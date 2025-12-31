@@ -1,7 +1,7 @@
 <?php
 /**
  * PHP Simple Remote Downloader - Minimal & Robust
- * Version: 2.5.0 Pro
+ * Version: 2.6.0 Pro (Fixed Redirect Loop)
  * Refactored for better performance on shared hosts.
  */
 
@@ -97,11 +97,6 @@ if (isset($_GET['action'])) {
         // Sanitize filename
         $filename = preg_replace('/[^\w\-\.]/', '_', urldecode($customName));
         
-        // Ensure extension exists (fallback)
-        if (empty(pathinfo($filename, PATHINFO_EXTENSION))) {
-             // Try to get header content-type logic here if needed, but for minimal script, keep it simple
-        }
-        
         $filePath = DOWNLOAD_DIR . DIRECTORY_SEPARATOR . $filename;
         
         $fp = fopen($filePath, 'w+');
@@ -110,9 +105,19 @@ if (isset($_GET['action'])) {
             exit;
         }
 
+        // --- FIX: Cookie Handling ---
+        $cookieFile = DOWNLOAD_DIR . '/cookie_' . md5(uniqid()) . '.txt';
+
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_FILE, $fp);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        
+        // Fix for Redirect Loop: Handle Cookies
+        curl_setopt($ch, CURLOPT_COOKIEJAR, $cookieFile);
+        curl_setopt($ch, CURLOPT_COOKIEFILE, $cookieFile);
+        curl_setopt($ch, CURLOPT_AUTOREFERER, true);
+        curl_setopt($ch, CURLOPT_MAXREDIRS, 20); // Keep limit but cookies should fix the loop
+        
         curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
         curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
         curl_setopt($ch, CURLOPT_NOPROGRESS, false);
@@ -147,11 +152,31 @@ if (isset($_GET['action'])) {
 
         $success = curl_exec($ch);
         $error = curl_error($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
         fclose($fp);
 
+        // Cleanup cookie file
+        if (file_exists($cookieFile)) {
+            @unlink($cookieFile);
+        }
+
         if ($success) {
-            sendSSE(['status' => 'done', 'message' => 'دانلود با موفقیت تکمیل شد.']);
+            if ($httpCode >= 200 && $httpCode < 300) {
+                sendSSE(['status' => 'done', 'message' => 'دانلود با موفقیت تکمیل شد.']);
+            } else {
+                // Determine if it was a soft 404 or other error page saved as file
+                $fileSize = filesize($filePath);
+                if ($fileSize < 10240) { // If file is very small (<10KB), it might be an HTML error page
+                    $content = file_get_contents($filePath);
+                    if (strpos($content, '<html') !== false || strpos($content, '403 Forbidden') !== false) {
+                         sendSSE(['status' => 'error', 'message' => "خطا: سرور مبدا اجازه دانلود نداد (HTTP $httpCode). ممکن است لینک منقضی شده باشد."]);
+                         @unlink($filePath);
+                         exit;
+                    }
+                }
+                sendSSE(['status' => 'done', 'message' => "دانلود شد، اما کد وضعیت HTTP برابر $httpCode بود."]);
+            }
         } else {
             sendSSE(['status' => 'error', 'message' => 'Error: ' . $error]);
             @unlink($filePath);
@@ -164,6 +189,9 @@ if (isset($_GET['action'])) {
         $files = array_diff(scandir(DOWNLOAD_DIR), array('.', '..', '.htaccess', 'index.php'));
         $fileList = [];
         foreach ($files as $file) {
+            // Skip cookie files if any remained
+            if (strpos($file, 'cookie_') === 0) continue;
+
             $path = DOWNLOAD_DIR . '/' . $file;
             $fileList[] = [
                 'name' => $file,
@@ -222,7 +250,7 @@ if (isset($_GET['action'])) {
             <!-- Header -->
             <div class="bg-gray-800 p-6 border-b border-gray-700 flex flex-col items-center">
                 <h1 class="text-2xl font-bold text-white mb-1">🚀 پی‌اچ‌پی دانلود اکسپرس</h1>
-                <p class="text-xs text-gray-500">انتقال سریع فایل بین سرورها</p>
+                <p class="text-xs text-gray-500">انتقال سریع فایل بین سرورها (با قابلیت کوکی)</p>
             </div>
 
             <!-- Form Section -->
@@ -306,7 +334,7 @@ if (isset($_GET['action'])) {
                     <h3 class="text-lg font-bold text-white">درباره اسکریپت</h3>
                 </div>
                 <p class="text-gray-400 text-sm leading-relaxed text-justify">
-                    این اسکریپت یک ابزار سبک و قدرتمند برای انتقال فایل از یک سرور به سرور دیگر (Remote Upload) است. با استفاده از این ابزار می‌توانید بدون مصرف ترافیک اینترنت شخصی، فایل‌های حجیم را مستقیماً روی هاست خود دانلود کنید. این نسخه برای کارکرد بهینه روی هاست‌های اشتراکی بهینه‌سازی شده است.
+                    این اسکریپت یک ابزار سبک و قدرتمند برای انتقال فایل از یک سرور به سرور دیگر (Remote Upload) است. این نسخه برای حل مشکل Redirect Loop بهینه‌سازی شده و از Cookie Jar استفاده می‌کند.
                 </p>
             </div>
 
@@ -333,10 +361,6 @@ if (isset($_GET['action'])) {
                         <span class="w-5 h-5 rounded-full bg-gray-700 flex items-center justify-center text-xs text-white">3</span>
                         منتظر بمانید تا نوار پیشرفت به 100% برسد.
                     </li>
-                    <li class="flex items-center gap-2">
-                        <span class="w-5 h-5 rounded-full bg-gray-700 flex items-center justify-center text-xs text-white">4</span>
-                        فایل در پوشه <code class="bg-gray-700 px-1 rounded text-yellow-400 mx-1">downloads</code> ذخیره می‌شود.
-                    </li>
                 </ul>
             </div>
 
@@ -352,13 +376,13 @@ if (isset($_GET['action'])) {
                 </div>
                 <div class="grid grid-cols-2 gap-2 text-sm text-gray-400">
                     <div class="bg-gray-900/50 p-2 rounded flex items-center gap-2">
-                        <span class="text-green-400">✓</span> دور زدن Timeout
+                        <span class="text-green-400">✓</span> مدیریت کوکی و سشن
                     </div>
                     <div class="bg-gray-900/50 p-2 rounded flex items-center gap-2">
-                        <span class="text-green-400">✓</span> بهینه برای Shared Host
+                        <span class="text-green-400">✓</span> حل مشکل Redirect 20
                     </div>
                     <div class="bg-gray-900/50 p-2 rounded flex items-center gap-2">
-                        <span class="text-green-400">✓</span> نام‌گذاری خودکار
+                        <span class="text-green-400">✓</span> نام‌گذاری هوشمند
                     </div>
                     <div class="bg-gray-900/50 p-2 rounded flex items-center gap-2">
                         <span class="text-green-400">✓</span> نمایش Real-time
@@ -385,7 +409,7 @@ if (isset($_GET['action'])) {
 
         <!-- Footer -->
         <div class="bg-gray-800 rounded-xl p-4 text-center text-sm text-gray-500 border border-gray-700">
-            طراحی و توسعه با ❤️ توسط <a href="https://rastegar.info" target="_blank" class="text-blue-400 hover:text-blue-300 transition-colors font-bold">رضا رستگار</a>
+            طراحی و توسعه با ❤️ توسط <a href="https://github.com/inforastegar/php-download-express" target="_blank" class="text-blue-400 hover:text-blue-300 transition-colors font-bold">رضا رستگار</a>
         </div>
     </div>
 
